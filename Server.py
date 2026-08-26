@@ -19,7 +19,7 @@ def start_server():
         if not data:
             print("cliente encerrou a conexão.")
             return
-        message = data.decode()
+        message = data.decode().strip()
         print(f"handshake recebido: {message}")
 
         try:
