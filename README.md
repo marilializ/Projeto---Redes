@@ -39,7 +39,9 @@ O enunciado menciona duas dimensões principais da operação:
 - envio individual ou em lote;
 - confirmação da janela por Go-Back-N ou Repetição Seletiva.
 
-Para simplificar a implementação, o projeto adota uma interpretação prática de `MODE`: o cliente indica o estilo de envio, e o servidor define a estratégia de confirmação da janela quando a comunicação ocorre em lote. Essa decisão reduz a complexidade do protocolo sem perder o objetivo didático do trabalho.
+Para simplificar a implementação, o projeto utiliza o campo `MODE` para indicar o modo de operação escolhido pelo cliente. Atualmente, o cliente pode selecionar entre envio `INDIVIDUAL`, `GBN` (Go-Back-N) e `SR` (Repetição Seletiva).
+
+Durante o handshake, o servidor valida o modo solicitado e retorna os parâmetros sob sua responsabilidade, como o tamanho inicial da janela de recepção.
 
 ## Tecnologias utilizadas
 
@@ -124,7 +126,9 @@ A lógica do protocolo será baseada em pacotes de aplicação com metadados, in
 - `CHECKSUM`: controle de integridade;
 - `PAYLOAD`: conteúdo do pacote, limitado a 4 caracteres.
 
-Para evitar problemas com o uso de `recv()` em TCP, será adotado um framing por tamanho fixo. Isso facilita o parsing dos pacotes e evita concatenação de mensagens em um único fluxo de bytes.
+Como o TCP fornece um fluxo contínuo de bytes e não preserva, por si só, os limites entre mensagens da aplicação, o protocolo deverá definir uma estratégia de framing.
+
+A estratégia definitiva de framing será definida durante a evolução do protocolo para os próximos checkpoints. Entre as alternativas consideradas estão o uso de delimitadores e o uso de prefixo indicando o tamanho da mensagem.
 
 ## Simulação de erros e perdas
 

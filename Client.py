@@ -56,7 +56,8 @@ def main():
         print(f"Resposta do servidor: {response}")
         
         try:
-            parse_config(response)
+            window_size = parse_config(response)
+            print(f"Janela definida pelo servidor: {window_size}")
             print("\nHandshake concluido! Prontos para transmitir.")
         except ValueError as error:
             print(f"\nFalha no handshake: {error}")

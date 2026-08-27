@@ -8,6 +8,13 @@ def start_server():
         socket.AF_INET,
         socket.SOCK_STREAM
     )
+
+    server_socket.setsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_REUSEADDR,
+        1
+    )
+    
     server_socket.bind((HOST, PORT))
     server_socket.listen(1)
     print(f"servidor aguardando conexão em {HOST}:{PORT}...")
