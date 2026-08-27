@@ -11,8 +11,6 @@ def receive_message(connection):
 
 def config_handshake():
 
-    size = Shared.DEFAULT_MAX_MESSAGE_SIZE
-
     print("\n--- Configuracao Inicial da Conexao ---")
     print("[ 1 ] Envio Individual")
     print("[ 2 ] Go-Back-N (GBN)")
@@ -34,12 +32,22 @@ def config_handshake():
         except ValueError:
             print("Digite um numero inteiro")
 
+    while True:
+        try:
+            size = int(input(f"Digite o size maximo do bloco (min. {Shared.MIN_MESSAGE_SIZE}): "))
+            if size < Shared.MIN_MESSAGE_SIZE:
+                print(f"size invalido! O size minimo permitido é {Shared.MIN_MESSAGE_SIZE}.")
+                continue
+            break
+        except ValueError:
+            print("Digite um numero inteiro")
+
     
     return mode, size
 
 
 def main():
-    modo, tamanho = config_handshake()
+    modo, size = config_handshake()
     
     cliente_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     print(f"\nConectando a {Shared.HOST}:{Shared.PORT}...")
@@ -48,7 +56,7 @@ def main():
         cliente_socket.connect((Shared.HOST, Shared.PORT))
         print("Conectado com sucesso!")
 
-        proposal = criar_handshake(modo, tamanho)
+        proposal = criar_handshake(modo, size)
         print(f"Enviando proposal de handshake: {proposal}")
         send_message(proposal, cliente_socket)
         
