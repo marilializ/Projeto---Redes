@@ -11,3 +11,5 @@ VALID_MODES = {
     "GBN",
     "SR"
 }
+
+PAYLOAD_SIZE = 4
