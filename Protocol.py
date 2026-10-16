@@ -1,4 +1,6 @@
 from Shared import VALID_MODES, MIN_MESSAGE_SIZE
+import struct
+from Shared import VALID_MODES, MIN_MESSAGE_SIZE
 
 
 def criar_handshake(mode, max_message_size):
@@ -46,3 +48,28 @@ def parse_config(message):
 
     window_size = int(parts[1].split("=")[1])
     return window_size
+
+HEADER_SIZE = 4
+
+
+def send_packet(sock, message):
+    data = message.encode("utf-8")
+    header = struct.pack("!I", len(data))
+    sock.sendall(header + data)
+
+
+def _recv_exact(sock, n):
+    buffer = b""
+    while len(buffer) < n:
+        chunk = sock.recv(n - len(buffer))
+        if not chunk:
+            raise ConnectionError("conexão encerrada pelo outro lado.")
+        buffer += chunk
+    return buffer
+
+
+def recv_packet(sock):
+    header = _recv_exact(sock, HEADER_SIZE)
+    (length,) = struct.unpack("!I", header)
+    data = _recv_exact(sock, length)
+    return data.decode("utf-8")

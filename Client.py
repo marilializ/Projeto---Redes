@@ -1,13 +1,8 @@
 import socket
 import Shared
-from Protocol import criar_handshake, parse_config
+from Protocol import criar_handshake, parse_config, send_packet, recv_packet
 
 
-def send_message(message, connection):
-    connection.sendall((message + "\n").encode())
-
-def receive_message(connection):
-    return connection.recv(1024).decode().strip()
 
 def config_handshake():
 
@@ -58,9 +53,9 @@ def main():
 
         proposal = criar_handshake(modo, size)
         print(f"Enviando proposal de handshake: {proposal}")
-        send_message(proposal, cliente_socket)
+        send_packet(cliente_socket, proposal)
         
-        response = receive_message(cliente_socket)
+        response = recv_packet(cliente_socket)
         print(f"Resposta do servidor: {response}")
         
         try:

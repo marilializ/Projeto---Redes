@@ -1,7 +1,6 @@
 import socket
 from Shared import HOST, PORT, DEFAULT_WINDOW_SIZE
-from Protocol import parse_handshake, create_config
-
+from Protocol import parse_handshake, create_config, send_packet, recv_packet
 
 def start_server():
     server_socket = socket.socket(
@@ -22,11 +21,7 @@ def start_server():
     print(f"cliente conectado: {client_address}")
 
     try:
-        data = client_socket.recv(1024)
-        if not data:
-            print("cliente encerrou a conexão.")
-            return
-        message = data.decode().strip()
+        message = recv_packet(client_socket)
         print(f"handshake recebido: {message}")
 
         try:
@@ -34,14 +29,15 @@ def start_server():
             print(f"modo: {mode}")
             print(f"tamanho máximo: {max_message_size}")
             response = create_config(DEFAULT_WINDOW_SIZE)
-            client_socket.sendall(response.encode())
+            send_packet(client_socket, response)
             print(f"configuração enviada: {response}")
 
         except ValueError as error:
             print(f"erro no handshake: {error}")
-            client_socket.sendall(
-                f"ERROR|{error}".encode()
-            )
+            send_packet(client_socket, f"ERROR|{error}")
+
+    except ConnectionError as error:
+        print(f"conexão perdida: {error}")
 
     finally:
         client_socket.close()
