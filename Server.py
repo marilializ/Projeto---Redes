@@ -49,6 +49,46 @@ def receive_individual(sock):
         else:
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
+def receive_gbn(sock):
+    expected_seq = 0
+    received = []
+
+    while True:
+        message = recv_packet(sock)
+
+        try:
+            pkt = parse_packet(message)
+        except ValueError as error:
+            print(f"[SERVIDOR] pacote invalido descartado: {error}")
+            continue
+
+        if pkt["type"] == "DATA":
+            seq, payload = pkt["seq"], pkt["payload"]
+
+            if not verify_checksum(seq, payload, pkt["chk"]):
+                print(f"[SERVIDOR] checksum invalido SEQ={seq} -> NAK")
+                send_packet(sock, create_nak(seq))
+                continue
+
+            if seq == expected_seq:
+                received.append(payload)
+                expected_seq += 1
+                print(f"[SERVIDOR] <- DATA SEQ={seq} '{payload}' -> ACK {seq}")
+                send_packet(sock, create_ack(seq))
+            else:
+                print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem (esperado {expected_seq}), descartado")
+                if expected_seq > 0:
+                    send_packet(sock, create_ack(expected_seq - 1))
+
+        elif pkt["type"] == "FIN":
+            if pkt["total"] != len(received):
+                print(f"[SERVIDOR] aviso: FIN indica {pkt['total']} pacotes, recebidos {len(received)}")
+            print("[SERVIDOR] <- FIN -> FINACK")
+            send_packet(sock, create_finack())
+            return "".join(received)
+
+        else:
+            print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
 def start_server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -82,9 +122,13 @@ def start_server():
 
         if mode == "INDIVIDUAL":
             text = receive_individual(client_socket)
-            print(f"\n[SERVIDOR] mensagem reconstruida: '{text}'")
+        elif mode == "GBN":
+            text = receive_gbn(client_socket)
         else:
             print(f"modo {mode} ainda nao implementado.")
+            return
+
+        print(f"\n[SERVIDOR] mensagem reconstruida: '{text}'")
 
     except ConnectionError as error:
         print(f"conexão perdida: {error}")

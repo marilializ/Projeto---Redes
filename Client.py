@@ -1,5 +1,6 @@
 import socket
 import Shared
+import time
 from Protocol import (
     criar_handshake, parse_config, send_packet, recv_packet,
     split_message, create_data, create_fin, parse_packet,
@@ -55,7 +56,7 @@ def read_message(max_size):
 
 
 def wait_response(sock, seq):
-    # Espera ACK/NAK do pacote 'seq'. Retorna "ACK", "NAK" ou "TIMEOUT".
+    
     while True:
         try:
             pkt = parse_packet(recv_packet(sock))
@@ -89,7 +90,48 @@ def send_individual(sock, chunks):
                 print(f"[CLIENTE] timeout SEQ={seq}, retransmitindo")
 
 
+def send_gbn(sock, chunks, window_size):
+    total = len(chunks)
+    base = 0
+    next_seq = 0
+    timer_start = None
+
+    while base < total:
+        while next_seq < base + window_size and next_seq < total:
+            send_packet(sock, create_data(next_seq, chunks[next_seq]))
+            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}'   "
+                  f"janela=[{base}..{base + window_size - 1}]")
+            if base == next_seq:
+                timer_start = time.monotonic()
+            next_seq += 1
+
+        remaining = Shared.TIMEOUT - (time.monotonic() - timer_start)
+        try:
+            if remaining <= 0:
+                raise socket.timeout
+            sock.settimeout(remaining)
+            pkt = parse_packet(recv_packet(sock))
+        except socket.timeout:
+            print(f"[CLIENTE] timeout! voltando para SEQ={base} e reenviando a janela")
+            next_seq = base
+            continue
+        except ValueError as error:
+            print(f"[CLIENTE] pacote invalido ignorado: {error}")
+            continue
+
+        if pkt["type"] == "ACK" and pkt["seq"] >= base:
+            print(f"[CLIENTE] <- ACK SEQ={pkt['seq']} (cumulativo)")
+            base = pkt["seq"] + 1
+            if base < next_seq:
+                timer_start = time.monotonic()
+        elif pkt["type"] == "NAK" and pkt["seq"] >= base:
+            print(f"[CLIENTE] <- NAK SEQ={pkt['seq']}, voltando para SEQ={base}")
+            next_seq = base
+        else:
+            print(f"[CLIENTE] {pkt['type']} SEQ={pkt.get('seq')} antigo, ignorado")
+
 def close_session(sock, total):
+    sock.settimeout(Shared.TIMEOUT)
     fin = create_fin(total)
     while True:
         send_packet(sock, fin)
@@ -137,11 +179,12 @@ def main():
         chunks = split_message(text)
         print(f"\nMensagem dividida em {len(chunks)} pacotes: {chunks}\n")
 
-        # A partir daqui o temporizador fica ativo
         cliente_socket.settimeout(Shared.TIMEOUT)
 
         if modo == "INDIVIDUAL":
             send_individual(cliente_socket, chunks)
+        elif modo == "GBN":
+            send_gbn(cliente_socket, chunks, window_size)
         else:
             print(f"Modo {modo} ainda nao implementado.")
             return
