@@ -1,19 +1,59 @@
 import socket
 from Shared import HOST, PORT, DEFAULT_WINDOW_SIZE
-from Protocol import parse_handshake, create_config, send_packet, recv_packet
+from Protocol import (
+    parse_handshake, create_config, send_packet, recv_packet,
+    parse_packet, verify_checksum, create_ack, create_nak, create_finack,
+)
+
+
+def receive_individual(sock):
+    expected_seq = 0
+    received = []
+
+    while True:
+        message = recv_packet(sock)
+
+        try:
+            pkt = parse_packet(message)
+        except ValueError as error:
+            print(f"[SERVIDOR] pacote invalido descartado: {error}")
+            continue
+
+        if pkt["type"] == "DATA":
+            seq, payload = pkt["seq"], pkt["payload"]
+
+            if not verify_checksum(seq, payload, pkt["chk"]):
+                print(f"[SERVIDOR] checksum invalido SEQ={seq} -> NAK")
+                send_packet(sock, create_nak(seq))
+                continue
+
+            if seq == expected_seq:
+                received.append(payload)
+                expected_seq += 1
+                print(f"[SERVIDOR] <- DATA SEQ={seq} '{payload}' -> ACK")
+                send_packet(sock, create_ack(seq))
+            elif seq < expected_seq:
+                # duplicado (o ACK anterior se perdeu): confirma de novo
+                print(f"[SERVIDOR] <- DATA SEQ={seq} duplicado -> ACK")
+                send_packet(sock, create_ack(seq))
+            else:
+                print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem, descartado")
+
+        elif pkt["type"] == "FIN":
+            if pkt["total"] != len(received):
+                print(f"[SERVIDOR] aviso: FIN indica {pkt['total']} pacotes, recebidos {len(received)}")
+            print("[SERVIDOR] <- FIN -> FINACK")
+            send_packet(sock, create_finack())
+            return "".join(received)
+
+        else:
+            print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
+
 
 def start_server():
-    server_socket = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM
-    )
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    server_socket.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_REUSEADDR,
-        1
-    )
-    
     server_socket.bind((HOST, PORT))
     server_socket.listen(1)
     print(f"servidor aguardando conexão em {HOST}:{PORT}...")
@@ -28,13 +68,23 @@ def start_server():
             mode, max_message_size = parse_handshake(message)
             print(f"modo: {mode}")
             print(f"tamanho máximo: {max_message_size}")
-            response = create_config(DEFAULT_WINDOW_SIZE)
+
+            # envio individual = janela de tamanho 1
+            window_size = 1 if mode == "INDIVIDUAL" else DEFAULT_WINDOW_SIZE
+            response = create_config(window_size)
             send_packet(client_socket, response)
-            print(f"configuração enviada: {response}")
+            print(f"configuração enviada: {response}\n")
 
         except ValueError as error:
             print(f"erro no handshake: {error}")
             send_packet(client_socket, f"ERROR|{error}")
+            return
+
+        if mode == "INDIVIDUAL":
+            text = receive_individual(client_socket)
+            print(f"\n[SERVIDOR] mensagem reconstruida: '{text}'")
+        else:
+            print(f"modo {mode} ainda nao implementado.")
 
     except ConnectionError as error:
         print(f"conexão perdida: {error}")

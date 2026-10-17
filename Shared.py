@@ -13,3 +13,5 @@ VALID_MODES = {
 }
 
 PAYLOAD_SIZE = 4
+
+TIMEOUT = 2.0
