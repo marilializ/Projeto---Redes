@@ -130,6 +130,55 @@ def send_gbn(sock, chunks, window_size):
         else:
             print(f"[CLIENTE] {pkt['type']} SEQ={pkt.get('seq')} antigo, ignorado")
 
+def send_sr(sock, chunks, window_size):
+    total = len(chunks)
+    base = 0
+    next_seq = 0
+    acked = set()
+    timers = {}
+
+    while base < total:
+        while next_seq < base + window_size and next_seq < total:
+            send_packet(sock, create_data(next_seq, chunks[next_seq]))
+            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}'   "
+                  f"janela=[{base}..{base + window_size - 1}]")
+            timers[next_seq] = time.monotonic()
+            next_seq += 1
+
+        now = time.monotonic()
+        expired = [s for s, t in timers.items() if now - t >= Shared.TIMEOUT]
+        for s in expired:
+            send_packet(sock, create_data(s, chunks[s]))
+            print(f"[CLIENTE] timeout SEQ={s}, retransmitindo apenas ele")
+            timers[s] = time.monotonic()
+
+        oldest = min(timers.values())
+        remaining = Shared.TIMEOUT - (time.monotonic() - oldest)
+        try:
+            sock.settimeout(max(remaining, 0.01))
+            pkt = parse_packet(recv_packet(sock))
+        except socket.timeout:
+            continue
+        except ValueError as error:
+            print(f"[CLIENTE] pacote invalido ignorado: {error}")
+            continue
+
+        seq = pkt.get("seq")
+        if pkt["type"] == "ACK" and seq in timers:
+            print(f"[CLIENTE] <- ACK SEQ={seq} (individual)")
+            acked.add(seq)
+            del timers[seq]
+            while base in acked:
+                base += 1
+        elif pkt["type"] == "NAK" and seq in timers:
+            print(f"[CLIENTE] <- NAK SEQ={seq}, retransmitindo apenas ele")
+            send_packet(sock, create_data(seq, chunks[seq]))
+            timers[seq] = time.monotonic()
+        else:
+            print(f"[CLIENTE] {pkt['type']} SEQ={seq} ja confirmado, ignorado")
+
+
+
 def close_session(sock, total):
     sock.settimeout(Shared.TIMEOUT)
     fin = create_fin(total)
@@ -185,8 +234,10 @@ def main():
             send_individual(cliente_socket, chunks)
         elif modo == "GBN":
             send_gbn(cliente_socket, chunks, window_size)
+        elif modo == "SR":
+            send_sr(cliente_socket, chunks, window_size)
         else:
-            print(f"Modo {modo} ainda nao implementado.")
+            print(f"Modo {modo} desconhecido.")
             return
 
         close_session(cliente_socket, len(chunks))
