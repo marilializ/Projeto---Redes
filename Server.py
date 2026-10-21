@@ -33,7 +33,6 @@ def receive_individual(sock):
                 print(f"[SERVIDOR] <- DATA SEQ={seq} '{payload}' -> ACK")
                 send_packet(sock, create_ack(seq))
             elif seq < expected_seq:
-                # duplicado (o ACK anterior se perdeu): confirma de novo
                 print(f"[SERVIDOR] <- DATA SEQ={seq} duplicado -> ACK")
                 send_packet(sock, create_ack(seq))
             else:
@@ -162,7 +161,6 @@ def start_server():
             print(f"modo: {mode}")
             print(f"tamanho máximo: {max_message_size}")
 
-            # envio individual = janela de tamanho 1
             window_size = 1 if mode == "INDIVIDUAL" else DEFAULT_WINDOW_SIZE
             response = create_config(window_size)
             send_packet(client_socket, response)
