@@ -43,6 +43,8 @@ Para simplificar a implementação, o projeto utiliza o campo `MODE` para indica
 
 Durante o handshake, o servidor valida o modo solicitado e retorna os parâmetros sob sua responsabilidade, como o tamanho inicial da janela de recepção.
 
+No modo `INDIVIDUAL`, o servidor responde com janela 1, já que o envio individual funciona como uma janela de tamanho 1 (stop-and-wait). Nos modos `GBN` e `SR`, a janela inicial é 5, definida pela constante `DEFAULT_WINDOW_SIZE` em `Shared.py`.
+
 ## Tecnologias utilizadas
 
 - Python 3
@@ -64,7 +66,7 @@ Projeto---Redes/
 
 ## Funcionamento geral
 
-O fluxo de funcionamento previsto é:
+O fluxo de funcionamento é:
 
 ```text
 Cliente conecta ao servidor
@@ -74,6 +76,7 @@ Fragmentação da mensagem em pacotes
 Envio dos pacotes com checksum e sequência
 Validação no servidor
 Confirmação (ACK/NAK)
+Encerramento (FIN/FINACK)
 Reconstrução da mensagem original
 ```
 
@@ -101,34 +104,56 @@ A aplicação deve atender aos seguintes requisitos:
 
 ### Passo a passo
 
-1. Abra um terminal na pasta do projeto.
-2. Inicie o servidor:
+1. Abra um terminal na pasta do projeto e inicie o servidor:
 
 ```bash
 python3 Server.py
 ```
 
-3. Em outro terminal, inicie o cliente:
+2. Em outro terminal, inicie o cliente:
 
 ```bash
 python3 Client.py
 ```
 
-4. Realize a comunicação conforme o fluxo do programa.
+No Windows, use `python` (ou `py`) no lugar de `python3`.
+
+3. No cliente, escolha o modo de operação (1 para Individual, 2 para Go-Back-N, 3 para Repetição Seletiva), informe o tamanho máximo da mensagem (mínimo 30) e digite a mensagem a ser enviada.
+
+4. O servidor mostra cada pacote recebido e, no final, a mensagem reconstruída. O cliente mostra cada confirmação recebida.
+
+O servidor encerra ao final de cada transmissão, então é preciso iniciá-lo novamente antes de cada teste.
 
 ## Protocolo proposto
 
-A lógica do protocolo será baseada em pacotes de aplicação com metadados, incluindo:
+### Framing
 
-- `FLAG`: tipo da mensagem;
-- `SEQ`: número de sequência;
-- `ACK`: confirmação recebida;
-- `CHECKSUM`: controle de integridade;
-- `PAYLOAD`: conteúdo do pacote, limitado a 4 caracteres.
+Cada mensagem é precedida por um cabeçalho de 4 bytes (inteiro sem sinal, big-endian) que indica o tamanho do conteúdo em bytes. O receptor lê primeiro esse cabeçalho e depois exatamente a quantidade de bytes indicada. Optou-se pelo prefixo de tamanho em vez de delimitadores porque o texto do usuário pode conter qualquer caractere, inclusive o próprio delimitador. As funções `send_packet()` e `recv_packet()`, em `Protocol.py`, são usadas para todas as mensagens, incluindo o handshake.
 
-Como o TCP fornece um fluxo contínuo de bytes e não preserva, por si só, os limites entre mensagens da aplicação, o protocolo deverá definir uma estratégia de framing.
+### Mensagens
 
-A estratégia definitiva de framing será definida durante a evolução do protocolo para os próximos checkpoints. Entre as alternativas consideradas estão o uso de delimitadores e o uso de prefixo indicando o tamanho da mensagem.
+Todas as mensagens seguem o formato de texto `TIPO|CAMPO=valor`:
+
+- `HELLO|MODE=<modo>|MAX=<tamanho>`: proposta de handshake enviada pelo cliente;
+- `CONFIG|WINDOW=<janela>`: resposta do servidor aceitando o handshake;
+- `ERROR|<motivo>`: resposta do servidor recusando o handshake;
+- `DATA|SEQ=<n>|CHK=<checksum>|<payload>`: pacote de dados, com payload de no máximo 4 caracteres, sempre no final;
+- `ACK|SEQ=<n>`: confirmação positiva;
+- `NAK|SEQ=<n>`: confirmação negativa (checksum inválido);
+- `FIN|TOTAL=<n>`: fim da transmissão, com o total de pacotes;
+- `FINACK`: confirmação do fim.
+
+### Checksum
+
+O checksum segue o modelo do checksum da Internet (RFC 1071): soma de palavras de 16 bits com retorno do carry e complemento de 1 no final. Ele é calculado sobre o número de sequência e o payload juntos, para que uma corrupção em qualquer um dos dois seja detectada. A implementação foi feita à mão, sem bibliotecas externas.
+
+### Modos de operação
+
+- `INDIVIDUAL`: stop-and-wait; o cliente envia um pacote e espera o ACK antes de enviar o próximo.
+- `GBN`: o cliente envia até N pacotes sem esperar resposta; o ACK é cumulativo, há um único temporizador, e em timeout ou NAK todos os pacotes a partir do mais antigo não confirmado são reenviados.
+- `SR`: o cliente envia até N pacotes sem esperar resposta; o ACK é individual, cada pacote tem seu próprio temporizador e só o pacote com problema é reenviado. O servidor guarda pacotes fora de ordem num buffer.
+
+O tempo de espera para retransmissão é de 2 segundos (`TIMEOUT` em `Shared.py`).
 
 ## Simulação de erros e perdas
 
@@ -146,12 +171,16 @@ A Inteligência Artificial foi utilizada como apoio didático ao longo do projet
 
 - compreender os conceitos de transporte confiável;
 - comparar GBN e Repetição Seletiva;
-- modelar a máquina de estados do protocolo;
 - revisar trechos de código e depuração;
-- discutir checksum, temporizador e fluxo de mensagens.
+- discutir checksum, temporizador e fluxo de mensagens;
+- desenhar o formato dos pacotes e o framing.
 
 A IA foi utilizada como ferramenta de apoio, mas todas as decisões técnicas foram validadas pelo grupo antes de sua implementação.
 
+O registro detalhado do uso de IA em cada etapa está no relatório de cada checkpoint.
+
 ## Status do projeto
 
-Este README serve como base para a documentação do trabalho e deve evoluir junto com a implementação do código. As seções de uso, execução e protocolo podem ser ajustadas conforme o desenvolvimento avançar.
+- Checkpoint 1 (Handshake e Sockets): concluído.
+- Checkpoint 2 (Protocolo Sem Erros): concluído. Os três modos (Individual, GBN e SR) funcionam no canal sem erros, com checksum, número de sequência, ACK/NAK, temporizador e janela já implementados.
+- Checkpoint 3 (Inserção de Erros e Perdas): a fazer.
