@@ -152,7 +152,7 @@ def send_sr(sock, chunks, window_size):
             print(f"[CLIENTE] timeout SEQ={s}, retransmitindo apenas ele")
             timers[s] = time.monotonic()
 
-        oldest = min(timers.values())
+        oldest = min(timers.values()) if timers else time.monotonic()
         remaining = Shared.TIMEOUT - (time.monotonic() - oldest)
         try:
             sock.settimeout(max(remaining, 0.01))
@@ -161,6 +161,22 @@ def send_sr(sock, chunks, window_size):
             continue
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
+            continue
+
+        if pkt["type"] == "WINDOW":
+            window_size = pkt["size"]
+            print(f"[CLIENTE] <- WINDOW SIZE={window_size} (Atualizando janela do cliente)")
+            continue
+
+        if pkt["type"] == "ACKG":
+            seqs = pkt.get("seqs", [])
+            print(f"[CLIENTE] <- ACKG SEQS={seqs} (Lote de confirmacao)")
+            for s in seqs:
+                if s in timers:
+                    acked.add(s)
+                    del timers[s]
+            while base in acked:
+                base += 1
             continue
 
         seq = pkt.get("seq")
@@ -175,7 +191,8 @@ def send_sr(sock, chunks, window_size):
             send_packet(sock, create_data(seq, chunks[seq]))
             timers[seq] = time.monotonic()
         else:
-            print(f"[CLIENTE] {pkt['type']} SEQ={seq} ja confirmado, ignorado")
+            if pkt["type"] not in ("WINDOW", "ACKG"):
+                print(f"[CLIENTE] {pkt['type']} SEQ={seq} ja confirmado, ignorado")
 
 
 
@@ -216,7 +233,7 @@ def main():
         print(f"Resposta do servidor: {response}")
 
         try:
-            window_size = parse_config(response)
+            window_size, ack_mode = parse_config(response)
         except ValueError as error:
             print(f"\nFalha no handshake: {error}")
             return
