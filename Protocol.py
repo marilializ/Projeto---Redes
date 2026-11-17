@@ -34,23 +34,27 @@ def parse_handshake(message):
     return mode, max_message_size
 
 
-def create_config(window_size):
-    return f"CONFIG|WINDOW={window_size}"
+def create_config(window_size, ack_mode):
+    return f"CONFIG|WINDOW={window_size}|ACKMODE={ack_mode}"
 
 
 def parse_config(message):
     parts = message.split("|")
-    if len(parts) != 2:
+    if len(parts) != 3 or parts[0] != "CONFIG":
         raise ValueError("configuração invalida.")
 
-    if parts[0] != "CONFIG":
-        raise ValueError("mensagem não é uma CONFIG.")
-
     window_size = int(parts[1].split("=")[1])
-    return window_size
+    ack_mode = parts[2].split("=")[1]
+    return window_size, ack_mode
 
 HEADER_SIZE = 4
 
+def create_window(size):
+    return f"WINDOW|SIZE={size}"
+
+def create_ackg(seqs_list):
+    seqs_str = ",".join(map(str, seqs_list))
+    return f"ACKG|SEQS={seqs_str}"
 
 def send_packet(sock, message):
     data = message.encode("utf-8")
@@ -135,6 +139,20 @@ def parse_packet(message):
             "payload": parts[3],
         }
 
+    if kind == "WINDOW":
+        parts = message.split("|")
+        if len(parts) != 2:
+            raise ValueError("pacote WINDOW mal formado.")
+        return {"type": "WINDOW", "size": _get_field(parts[1], "SIZE")}
+
+    if kind == "ACKG":
+        parts = message.split("|")
+        if len(parts) != 2:
+            raise ValueError("pacote ACKG mal formado.")
+        _, _, value = parts[1].partition("=")
+        seqs = [int(x) for x in value.split(",")] if value else []
+        return {"type": "ACKG", "seqs": seqs}
+    
     if kind in ("ACK", "NAK"):
         parts = message.split("|")
         if len(parts) != 2:
