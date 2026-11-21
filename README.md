@@ -58,6 +58,7 @@ Projeto---Redes/
 ├── Client.py
 ├── Server.py
 ├── Protocol.py
+├── Cipher.py
 ├── Shared.py
 ├── README.md
 ├── Diario_ia.md
@@ -134,10 +135,10 @@ Cada mensagem é precedida por um cabeçalho de 4 bytes (inteiro sem sinal, big-
 
 Todas as mensagens seguem o formato de texto `TIPO|CAMPO=valor`:
 
-- `HELLO|MODE=<modo>|MAX=<tamanho>`: proposta de handshake enviada pelo cliente;
+- `HELLO|MODE=<modo>|MAX=<tamanho>|KEY=<chave em hex>`: proposta de handshake enviada pelo cliente, com a chave de sessão;
 - `CONFIG|WINDOW=<janela>`: resposta do servidor aceitando o handshake;
 - `ERROR|<motivo>`: resposta do servidor recusando o handshake;
-- `DATA|SEQ=<n>|CHK=<checksum>|<payload>`: pacote de dados, com payload de no máximo 4 caracteres, sempre no final;
+- `DATA|SEQ=<n>|CHK=<checksum>|<payload cifrado em hex>`: pacote de dados, com até 4 caracteres de texto, cifrados e representados em hexadecimal, sempre no final;
 - `ACK|SEQ=<n>`: confirmação positiva;
 - `NAK|SEQ=<n>`: confirmação negativa (checksum inválido);
 - `FIN|TOTAL=<n>`: fim da transmissão, com o total de pacotes;
@@ -145,7 +146,23 @@ Todas as mensagens seguem o formato de texto `TIPO|CAMPO=valor`:
 
 ### Checksum
 
-O checksum segue o modelo do checksum da Internet (RFC 1071): soma de palavras de 16 bits com retorno do carry e complemento de 1 no final. Ele é calculado sobre o número de sequência e o payload juntos, para que uma corrupção em qualquer um dos dois seja detectada. A implementação foi feita à mão, sem bibliotecas externas.
+O checksum segue o modelo do checksum da Internet (RFC 1071): soma de palavras de 16 bits com retorno do carry e complemento de 1 no final. Ele é calculado sobre o número de sequência e o payload **já cifrado** juntos, para que uma corrupção em qualquer um dos dois seja detectada. A implementação foi feita à mão, sem bibliotecas externas.
+
+### Criptografia (Ponto Extra 2)
+
+O payload de cada pacote DATA é cifrado com uma cifra simétrica XOR com chave repetida, implementada à mão em `Cipher.py`, sem bibliotecas de criptografia:
+
+```text
+cifrado[i] = claro[i] XOR chave[i mod tamanho_da_chave]
+```
+
+- **Simétrica e auto-inversa:** como `(m XOR k) XOR k = m`, a mesma função cifra e decifra, com a mesma chave.
+- **Chave de sessão:** o cliente sorteia uma chave de 8 bytes a cada conexão e a envia no campo `KEY` do `HELLO`. Não há chave fixa no código; duas execuções com o mesmo texto geram pacotes diferentes.
+- **Hexadecimal:** depois do XOR o payload vira bytes arbitrários, que não formam UTF-8 válido para o envio. Por isso ele viaja em hexadecimal (conversão também feita à mão). O texto é cifrado sobre seus bytes UTF-8: um caractere ASCII ocupa 2 dígitos hex, e um acentuado, 4. Por exemplo, `"test"` vira 8 dígitos e `"ação"` vira 12. A carga útil da aplicação continua sendo de 4 caracteres.
+- **Ordem das operações (encrypt-then-MAC):** o cliente cifra primeiro e calcula o checksum sobre o payload cifrado. O servidor verifica o checksum antes de decifrar; pacote corrompido recebe NAK sem ser decifrado.
+- **Simulação de erros:** a corrupção deliberada de pacotes deve acontecer depois da cifragem (em `build_packet()`, no `Client.py`), para que seja detectada pelo checksum e gere NAK.
+
+Limitações conhecidas: a chave viaja em claro no handshake, então quem captura o `HELLO` consegue decifrar a sessão; e o XOR com chave repetida é vulnerável a texto conhecido (`claro XOR cifrado` revela a chave). A cifra cumpre o objetivo didático do ponto extra, mas não oferece segurança real.
 
 ### Modos de operação
 
