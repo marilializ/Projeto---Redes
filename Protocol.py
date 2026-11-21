@@ -1,21 +1,23 @@
 from Shared import VALID_MODES, MIN_MESSAGE_SIZE
 import struct
 from Shared import VALID_MODES, MIN_MESSAGE_SIZE, PAYLOAD_SIZE
+from Cipher import to_hex, from_hex, encrypt_payload
 
 
-def criar_handshake(mode, max_message_size):
+def criar_handshake(mode, max_message_size, key):
     if mode not in VALID_MODES:
         raise ValueError("modo de operação invalido.")
     if max_message_size < MIN_MESSAGE_SIZE:
         raise ValueError(
             f"o tamanho maximo deve ser de pelo menos {MIN_MESSAGE_SIZE} caracteres."
         )
-    return f"HELLO|MODE={mode}|MAX={max_message_size}"
+    # chave de sessao negociada no handshake, em hex
+    return f"HELLO|MODE={mode}|MAX={max_message_size}|KEY={to_hex(key)}"
 
 
 def parse_handshake(message):
     parts = message.split("|")
-    if len(parts) != 3:
+    if len(parts) != 4:
         raise ValueError("handshake invalido.")
 
     if parts[0] != "HELLO":
@@ -24,6 +26,11 @@ def parse_handshake(message):
     mode = parts[1].split("=")[1]
     max_message_size = int(parts[2].split("=")[1])
 
+    field, _, key_hex = parts[3].partition("=")
+    if field != "KEY" or not key_hex:
+        raise ValueError("chave de sessao ausente no HELLO.")
+    key = from_hex(key_hex)
+
     if mode not in VALID_MODES:
         raise ValueError("modo de operação inválido.")
 
@@ -31,7 +38,7 @@ def parse_handshake(message):
         raise ValueError(
             f"o tamanho maximo deve ser de pelo menos {MIN_MESSAGE_SIZE} caracteres."
         )
-    return mode, max_message_size
+    return mode, max_message_size, key
 
 
 def create_config(window_size, ack_mode):
@@ -97,11 +104,14 @@ def verify_checksum(seq, payload, checksum):
 def split_message(text):
     return [text[i:i + PAYLOAD_SIZE] for i in range(0, len(text), PAYLOAD_SIZE)]
 
-def create_data(seq, payload):
+def create_data(seq, payload, key):
+    # o limite de 4 caracteres vale para o texto claro (carga util da aplicacao)
     if len(payload) > PAYLOAD_SIZE:
         raise ValueError(f"payload maior que {PAYLOAD_SIZE} caracteres.")
-    checksum = calc_checksum(seq, payload)
-    return f"DATA|SEQ={seq}|CHK={checksum}|{payload}"
+    # encrypt-then-MAC: cifra primeiro, checksum sobre o payload cifrado (hex)
+    cipher_hex = encrypt_payload(payload, key)
+    checksum = calc_checksum(seq, cipher_hex)
+    return f"DATA|SEQ={seq}|CHK={checksum}|{cipher_hex}"
 
 
 def create_ack(seq):

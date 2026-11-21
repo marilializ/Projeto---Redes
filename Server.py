@@ -6,6 +6,29 @@ from Protocol import (
     parse_packet, verify_checksum, create_ack, create_nak, create_finack,
     create_window, create_ackg
 )
+from Cipher import decrypt_payload, to_hex
+
+
+def open_data(sock, pkt, key):
+    # Ordem encrypt-then-MAC: 1) checksum sobre o payload cifrado (hex);
+    # 2) so se estiver integro, decifra. Pacote corrompido recebe NAK sem
+    # ser decifrado. Retorna o texto claro, ou None se mandou NAK.
+    seq, cipher_hex = pkt["seq"], pkt["payload"]
+
+    if not verify_checksum(seq, cipher_hex, pkt["chk"]):
+        print(f"[SERVIDOR] checksum invalido SEQ={seq} -> NAK")
+        send_packet(sock, create_nak(seq))
+        return None
+
+    try:
+        text = decrypt_payload(cipher_hex, key)
+    except ValueError as error:
+        print(f"[SERVIDOR] falha ao decifrar SEQ={seq} ({error}) -> NAK")
+        send_packet(sock, create_nak(seq))
+        return None
+
+    print(f"[SERVIDOR] SEQ={seq} cifrado={cipher_hex} -> decifrado '{text}'")
+    return text
 
 def update_window_if_needed(sock, expected_seq, current_window):
     if expected_seq in WINDOW_SCHEDULE and WINDOW_SCHEDULE[expected_seq] != current_window:
@@ -38,7 +61,7 @@ def handle_fin(sock, pkt, received_len, fallback_packet, timeout_limit=5):
                 pass
         return True
 
-def receive_individual(sock):
+def receive_individual(sock, key):
     expected_seq = 0
     received = []
 
@@ -52,11 +75,9 @@ def receive_individual(sock):
             continue
 
         if pkt["type"] == "DATA":
-            seq, payload = pkt["seq"], pkt["payload"]
-
-            if not verify_checksum(seq, payload, pkt["chk"]):
-                print(f"[SERVIDOR] checksum invalido SEQ={seq} -> NAK")
-                send_packet(sock, create_nak(seq))
+            seq = pkt["seq"]
+            payload = open_data(sock, pkt, key)
+            if payload is None:
                 continue
 
             if seq == expected_seq:
@@ -81,7 +102,7 @@ def receive_individual(sock):
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
 
-def receive_gbn(sock):
+def receive_gbn(sock, key):
     expected_seq = 0
     received = []
     current_window = DEFAULT_WINDOW_SIZE
@@ -101,11 +122,9 @@ def receive_gbn(sock):
             continue
 
         if pkt["type"] == "DATA":
-            seq, payload = pkt["seq"], pkt["payload"]
-
-            if not verify_checksum(seq, payload, pkt["chk"]):
-                print(f"[SERVIDOR] checksum invalido SEQ={seq} -> NAK")
-                send_packet(sock, create_nak(seq))
+            seq = pkt["seq"]
+            payload = open_data(sock, pkt, key)
+            if payload is None:
                 continue
 
             if seq == expected_seq:
@@ -134,7 +153,7 @@ def receive_gbn(sock):
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
 
-def receive_sr(sock, initial_window):
+def receive_sr(sock, initial_window, key):
     rcv_base = 0
     buffer = {}
     received = []
@@ -156,11 +175,9 @@ def receive_sr(sock, initial_window):
             continue
 
         if pkt["type"] == "DATA":
-            seq, payload = pkt["seq"], pkt["payload"]
-
-            if not verify_checksum(seq, payload, pkt["chk"]):
-                print(f"[SERVIDOR] checksum invalido SEQ={seq} -> NAK")
-                send_packet(sock, create_nak(seq))
+            seq = pkt["seq"]
+            payload = open_data(sock, pkt, key)
+            if payload is None:
                 continue
 
             if rcv_base <= seq < rcv_base + current_window:
@@ -214,9 +231,10 @@ def start_server():
         print(f"handshake recebido: {message}")
 
         try:
-            mode, max_message_size = parse_handshake(message)
+            mode, max_message_size, key = parse_handshake(message)
             print(f"modo: {mode}")
             print(f"tamanho máximo: {max_message_size}")
+            print(f"chave de sessao: {to_hex(key)}")
 
             window_size = 1 if mode == "INDIVIDUAL" else DEFAULT_WINDOW_SIZE
             
@@ -231,11 +249,11 @@ def start_server():
             return
 
         if mode == "INDIVIDUAL":
-            text = receive_individual(client_socket)
+            text = receive_individual(client_socket, key)
         elif mode == "GBN":
-            text = receive_gbn(client_socket)
+            text = receive_gbn(client_socket, key)
         elif mode == "SR":
-            text = receive_sr(client_socket, window_size)
+            text = receive_sr(client_socket, window_size, key)
         else:
             print(f"modo {mode} desconhecido.")
             return

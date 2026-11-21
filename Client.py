@@ -5,6 +5,7 @@ from Protocol import (
     criar_handshake, parse_config, send_packet, recv_packet,
     split_message, create_data, create_fin, parse_packet,
 )
+from Cipher import generate_key, to_hex
 
 
 def config_handshake():
@@ -72,13 +73,29 @@ def wait_response(sock, seq):
         print(f"[CLIENTE] pacote inesperado ignorado: {pkt}")
 
 
-def send_individual(sock, chunks):
+def build_packet(seq, payload, key):
+    # Unico ponto onde o cliente monta pacotes DATA (todos os modos passam aqui).
+    packet = create_data(seq, payload, key)
+    # PONTO DE INTEGRACAO: simulacao de erros.
+    # A corrupcao deve ser aplicada AQUI, sobre `packet` ja cifrado e com
+    # checksum calculado. Corromper antes de create_data so geraria texto
+    # decifrado errado, sem falha de checksum (e sem NAK). Para manter o pacote
+    # parseavel, troque um digito hex do payload por outro digito hex.
+    return packet
+
+
+def cipher_of(packet):
+    # payload cifrado (hex) de um pacote DATA, so para log
+    return packet.split("|", 3)[3]
+
+
+def send_individual(sock, chunks, key):
     for seq, payload in enumerate(chunks):
-        packet = create_data(seq, payload)
+        packet = build_packet(seq, payload, key)
 
         while True:
             send_packet(sock, packet)
-            print(f"[CLIENTE] -> DATA SEQ={seq} '{payload}'")
+            print(f"[CLIENTE] -> DATA SEQ={seq} '{payload}' cifrado={cipher_of(packet)}")
 
             result = wait_response(sock, seq)
             if result == "ACK":
@@ -90,7 +107,7 @@ def send_individual(sock, chunks):
                 print(f"[CLIENTE] timeout SEQ={seq}, retransmitindo")
 
 
-def send_gbn(sock, chunks, window_size):
+def send_gbn(sock, chunks, window_size, key):
     total = len(chunks)
     base = 0
     next_seq = 0
@@ -98,8 +115,9 @@ def send_gbn(sock, chunks, window_size):
 
     while base < total:
         while next_seq < base + window_size and next_seq < total:
-            send_packet(sock, create_data(next_seq, chunks[next_seq]))
-            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}'   "
+            packet = build_packet(next_seq, chunks[next_seq], key)
+            send_packet(sock, packet)
+            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}' cifrado={cipher_of(packet)}   "
                   f"janela=[{base}..{base + window_size - 1}]")
             if base == next_seq:
                 timer_start = time.monotonic()
@@ -130,7 +148,7 @@ def send_gbn(sock, chunks, window_size):
         else:
             print(f"[CLIENTE] {pkt['type']} SEQ={pkt.get('seq')} antigo, ignorado")
 
-def send_sr(sock, chunks, window_size):
+def send_sr(sock, chunks, window_size, key):
     total = len(chunks)
     base = 0
     next_seq = 0
@@ -139,8 +157,9 @@ def send_sr(sock, chunks, window_size):
 
     while base < total:
         while next_seq < base + window_size and next_seq < total:
-            send_packet(sock, create_data(next_seq, chunks[next_seq]))
-            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}'   "
+            packet = build_packet(next_seq, chunks[next_seq], key)
+            send_packet(sock, packet)
+            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}' cifrado={cipher_of(packet)}   "
                   f"janela=[{base}..{base + window_size - 1}]")
             timers[next_seq] = time.monotonic()
             next_seq += 1
@@ -148,7 +167,7 @@ def send_sr(sock, chunks, window_size):
         now = time.monotonic()
         expired = [s for s, t in timers.items() if now - t >= Shared.TIMEOUT]
         for s in expired:
-            send_packet(sock, create_data(s, chunks[s]))
+            send_packet(sock, build_packet(s, chunks[s], key))
             print(f"[CLIENTE] timeout SEQ={s}, retransmitindo apenas ele")
             timers[s] = time.monotonic()
 
@@ -188,7 +207,7 @@ def send_sr(sock, chunks, window_size):
                 base += 1
         elif pkt["type"] == "NAK" and seq in timers:
             print(f"[CLIENTE] <- NAK SEQ={seq}, retransmitindo apenas ele")
-            send_packet(sock, create_data(seq, chunks[seq]))
+            send_packet(sock, build_packet(seq, chunks[seq], key))
             timers[seq] = time.monotonic()
         else:
             if pkt["type"] not in ("WINDOW", "ACKG"):
@@ -225,7 +244,9 @@ def main():
         cliente_socket.connect((Shared.HOST, Shared.PORT))
         print("Conectado com sucesso!")
 
-        proposal = criar_handshake(modo, size)
+        key = generate_key()
+        print(f"Chave de sessao gerada: {to_hex(key)}")
+        proposal = criar_handshake(modo, size, key)
         print(f"Enviando proposal de handshake: {proposal}")
         send_packet(cliente_socket, proposal)
 
@@ -248,11 +269,11 @@ def main():
         cliente_socket.settimeout(Shared.TIMEOUT)
 
         if modo == "INDIVIDUAL":
-            send_individual(cliente_socket, chunks)
+            send_individual(cliente_socket, chunks, key)
         elif modo == "GBN":
-            send_gbn(cliente_socket, chunks, window_size)
+            send_gbn(cliente_socket, chunks, window_size, key)
         elif modo == "SR":
-            send_sr(cliente_socket, chunks, window_size)
+            send_sr(cliente_socket, chunks, window_size, key)
         else:
             print(f"Modo {modo} desconhecido.")
             return
