@@ -30,6 +30,18 @@ PAYLOAD_SIZE = 4
 # Requisito: temporizador. Segundos sem confirmacao ate o cliente retransmitir.
 TIMEOUT = 2.0
 
+# Temporizador de recepcao do servidor (GBN/SR em GROUP: confirma o ultimo
+# lote incompleto). Precisa ser MENOR que o TIMEOUT do cliente, senao os dois
+# estouram juntos e o cliente retransmite a janela sem necessidade.
+SERVER_TIMEOUT = 1.0
+
+# Limites da janela (requisito: de 1 a 5, definida pelo servidor)
+MIN_WINDOW = 1
+MAX_WINDOW = 5
+
+# Quantos FIN com TOTAL divergente o servidor recusa antes de abortar
+MAX_FIN_REJEITADOS = 5
+
 # Mudancas de janela feitas pelo servidor durante a transmissao (GBN e SR).
 # Formato {seq: nova_janela}: quando o servidor passa a esperar o SEQ da chave,
 # ele muda a propria janela e avisa o cliente com um pacote WINDOW.
@@ -40,3 +52,15 @@ WINDOW_SCHEDULE = {0: 5, 4: 2, 8: 4}
 #   "INDIVIDUAL" -> um ACK para cada pacote recebido
 #   "GROUP"      -> confirmacoes em lote (ACK cumulativo no GBN, ACKG no SR)
 SERVER_ACK_MODE = "GROUP"
+
+# Simulador de erros e perdas (lado cliente, deterministico).
+# Cada lista guarda os SEQs que vao sofrer aquele erro. O erro acontece so na
+# PRIMEIRA tentativa de cada SEQ; a retransmissao passa limpa (senao o
+# protocolo entraria em loop infinito). Ex.: "corrupt": [2] corrompe o SEQ 2
+# uma unica vez. Listas vazias = canal sem erros.
+ERROR_PLAN = {
+    "corrupt":   [],   # troca um digito hex do payload -> checksum falha -> NAK
+    "drop_data": [],   # DATA nao e enviado -> estoura o temporizador do cliente
+    "duplicate": [],   # DATA enviado duas vezes -> servidor descarta a copia
+    "drop_ack":  [],   # ACK/ACKG recebido e descartado -> forca retransmissao
+}

@@ -13,9 +13,8 @@
 #   FIN|TOTAL=<n>                              fim da transmissao
 #   FINACK                                     confirmacao do fim
 
-from Shared import VALID_MODES, MIN_MESSAGE_SIZE
 import struct
-from Shared import VALID_MODES, MIN_MESSAGE_SIZE, PAYLOAD_SIZE
+from Shared import VALID_MODES, MIN_MESSAGE_SIZE, PAYLOAD_SIZE, MIN_WINDOW, MAX_WINDOW
 from Cipher import to_hex, from_hex, encrypt_payload
 
 
@@ -84,6 +83,8 @@ HEADER_SIZE = 4
 
 # Servidor avisando o cliente que a janela mudou (ver WINDOW_SCHEDULE)
 def create_window(size):
+    if not MIN_WINDOW <= size <= MAX_WINDOW:
+        raise ValueError(f"janela {size} fora do intervalo {MIN_WINDOW}..{MAX_WINDOW}.")
     return f"WINDOW|SIZE={size}"
 
 # Confirmacao em lote do SR: lista de SEQs recebidos, ex. "ACKG|SEQS=0,1,3"
@@ -220,7 +221,11 @@ def parse_packet(message):
         parts = message.split("|")
         if len(parts) != 2:
             raise ValueError("pacote WINDOW mal formado.")
-        return {"type": "WINDOW", "size": _get_field(parts[1], "SIZE")}
+        size = _get_field(parts[1], "SIZE")
+        # janela fora de 1..5 e pacote invalido: o cliente descarta
+        if not MIN_WINDOW <= size <= MAX_WINDOW:
+            raise ValueError(f"janela {size} fora do intervalo {MIN_WINDOW}..{MAX_WINDOW}.")
+        return {"type": "WINDOW", "size": size}
 
     if kind == "ACKG":
         parts = message.split("|")
