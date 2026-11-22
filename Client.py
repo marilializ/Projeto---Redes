@@ -1,3 +1,7 @@
+# Cliente: le modo e tamanho do usuario, faz o handshake, fatia a mensagem em
+# pacotes de 4 caracteres e os envia no modo escolhido (INDIVIDUAL, GBN ou SR),
+# retransmitindo em caso de NAK ou timeout. Termina com FIN/FINACK.
+
 import socket
 import Shared
 import time
@@ -8,6 +12,8 @@ from Protocol import (
 from Cipher import generate_key, to_hex
 
 
+# Menu inicial: pergunta o modo de operacao e o tamanho maximo da mensagem,
+# repetindo a pergunta ate receber um valor valido.
 def config_handshake():
 
     print("\n--- Configuracao Inicial da Conexao ---")
@@ -44,6 +50,7 @@ def config_handshake():
     return mode, size
 
 
+# Le a mensagem respeitando o tamanho maximo negociado no handshake
 def read_message(max_size):
     while True:
         text = input(f"\nDigite a mensagem a enviar (max. {max_size} caracteres): ")
@@ -56,12 +63,16 @@ def read_message(max_size):
         return text
 
 
+# Usada no modo INDIVIDUAL: espera a resposta para o pacote `seq` e devolve
+# "ACK", "NAK" ou "TIMEOUT". Respostas de outros SEQs (ex.: ACK atrasado de um
+# pacote anterior) sao ignoradas e a espera continua.
 def wait_response(sock, seq):
-    
+
     while True:
         try:
             pkt = parse_packet(recv_packet(sock))
         except socket.timeout:
+            # o socket tem settimeout(TIMEOUT): este e o temporizador do pacote
             return "TIMEOUT"
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
@@ -89,10 +100,13 @@ def cipher_of(packet):
     return packet.split("|", 3)[3]
 
 
+# Modo INDIVIDUAL (stop-and-wait): envia um pacote e so passa para o proximo
+# depois do ACK. NAK ou timeout reenviam o mesmo pacote.
 def send_individual(sock, chunks, key):
     for seq, payload in enumerate(chunks):
         packet = build_packet(seq, payload, key)
 
+        # repete ate o pacote ser confirmado
         while True:
             send_packet(sock, packet)
             print(f"[CLIENTE] -> DATA SEQ={seq} '{payload}' cifrado={cipher_of(packet)}")
@@ -107,6 +121,12 @@ def send_individual(sock, chunks, key):
                 print(f"[CLIENTE] timeout SEQ={seq}, retransmitindo")
 
 
+# Modo Go-Back-N: ate `window_size` pacotes enviados sem confirmacao.
+#   base       = SEQ mais antigo ainda nao confirmado
+#   next_seq   = proximo SEQ a enviar
+#   [base, next_seq) = pacotes enviados aguardando ACK
+# Ha um unico temporizador, do pacote `base`. ACK e cumulativo (ACK n confirma
+# tudo ate n). Em timeout ou NAK, volta para `base` e reenvia toda a janela.
 def send_gbn(sock, chunks, window_size, key):
     total = len(chunks)
     base = 0
@@ -114,22 +134,27 @@ def send_gbn(sock, chunks, window_size, key):
     timer_start = None
 
     while base < total:
+        # 1) preenche a janela: envia enquanto houver espaco e pacotes
         while next_seq < base + window_size and next_seq < total:
             packet = build_packet(next_seq, chunks[next_seq], key)
             send_packet(sock, packet)
             print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}' cifrado={cipher_of(packet)}   "
                   f"janela=[{base}..{base + window_size - 1}]")
+            # o temporizador e do pacote mais antigo: so liga se este for a base
             if base == next_seq:
                 timer_start = time.monotonic()
             next_seq += 1
 
+        # 2) espera resposta so pelo tempo que falta para o temporizador estourar
         remaining = Shared.TIMEOUT - (time.monotonic() - timer_start)
         try:
             if remaining <= 0:
+                # o temporizador ja estourou antes mesmo de esperar
                 raise socket.timeout
             sock.settimeout(remaining)
             pkt = parse_packet(recv_packet(sock))
         except socket.timeout:
+            # Go-Back-N: next_seq = base faz o passo 1 reenviar a janela inteira
             print(f"[CLIENTE] timeout! voltando para SEQ={base} e reenviando a janela")
             next_seq = base
             continue
@@ -137,17 +162,28 @@ def send_gbn(sock, chunks, window_size, key):
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
             continue
 
+        # 3) trata a resposta
         if pkt["type"] == "ACK" and pkt["seq"] >= base:
+            # cumulativo: tudo ate pkt["seq"] foi recebido, a janela desliza
             print(f"[CLIENTE] <- ACK SEQ={pkt['seq']} (cumulativo)")
             base = pkt["seq"] + 1
+            # ainda ha pacotes pendentes: reinicia o temporizador para a nova base
             if base < next_seq:
                 timer_start = time.monotonic()
         elif pkt["type"] == "NAK" and pkt["seq"] >= base:
             print(f"[CLIENTE] <- NAK SEQ={pkt['seq']}, voltando para SEQ={base}")
             next_seq = base
         else:
+            # ACK/NAK de pacote ja confirmado (seq < base). Pacotes WINDOW
+            # tambem caem aqui: o GBN nao trata mudanca de janela no cliente.
             print(f"[CLIENTE] {pkt['type']} SEQ={pkt.get('seq')} antigo, ignorado")
 
+# Modo Repeticao Seletiva: ate `window_size` pacotes sem confirmacao, mas cada
+# pacote tem o proprio temporizador e so o pacote com problema e reenviado.
+#   base   = SEQ mais antigo ainda nao confirmado
+#   acked  = SEQs ja confirmados (podem estar fora de ordem)
+#   timers = {seq: instante do ultimo envio} dos pacotes aguardando confirmacao
+# A janela so desliza quando `base` e confirmado.
 def send_sr(sock, chunks, window_size, key):
     total = len(chunks)
     base = 0
@@ -156,6 +192,7 @@ def send_sr(sock, chunks, window_size, key):
     timers = {}
 
     while base < total:
+        # 1) preenche a janela, ligando um temporizador para cada pacote
         while next_seq < base + window_size and next_seq < total:
             packet = build_packet(next_seq, chunks[next_seq], key)
             send_packet(sock, packet)
@@ -164,6 +201,7 @@ def send_sr(sock, chunks, window_size, key):
             timers[next_seq] = time.monotonic()
             next_seq += 1
 
+        # 2) reenvia apenas os pacotes cujo temporizador estourou
         now = time.monotonic()
         expired = [s for s, t in timers.items() if now - t >= Shared.TIMEOUT]
         for s in expired:
@@ -171,22 +209,29 @@ def send_sr(sock, chunks, window_size, key):
             print(f"[CLIENTE] timeout SEQ={s}, retransmitindo apenas ele")
             timers[s] = time.monotonic()
 
+        # 3) espera resposta ate o proximo temporizador a estourar (o mais
+        #    antigo); o minimo de 0.01s evita settimeout(0), que nao bloqueia
         oldest = min(timers.values()) if timers else time.monotonic()
         remaining = Shared.TIMEOUT - (time.monotonic() - oldest)
         try:
             sock.settimeout(max(remaining, 0.01))
             pkt = parse_packet(recv_packet(sock))
         except socket.timeout:
+            # volta ao passo 2, que reenvia o que expirou
             continue
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
             continue
 
+        # 4) trata a resposta
+        # Servidor mudou a janela (WINDOW_SCHEDULE): vale a partir do passo 1
         if pkt["type"] == "WINDOW":
             window_size = pkt["size"]
             print(f"[CLIENTE] <- WINDOW SIZE={window_size} (Atualizando janela do cliente)")
             continue
 
+        # Confirmacao em lote (modo GROUP): marca cada SEQ como confirmado,
+        # desliga seu temporizador e desliza a base sobre os confirmados
         if pkt["type"] == "ACKG":
             seqs = pkt.get("seqs", [])
             print(f"[CLIENTE] <- ACKG SEQS={seqs} (Lote de confirmacao)")
@@ -198,6 +243,8 @@ def send_sr(sock, chunks, window_size, key):
                 base += 1
             continue
 
+        # ACK/NAK individuais. `seq in timers` garante que o pacote ainda
+        # aguarda confirmacao; respostas repetidas caem no else.
         seq = pkt.get("seq")
         if pkt["type"] == "ACK" and seq in timers:
             print(f"[CLIENTE] <- ACK SEQ={seq} (individual)")
@@ -215,6 +262,8 @@ def send_sr(sock, chunks, window_size, key):
 
 
 
+# Encerramento: envia FIN com o total de pacotes e repete ate receber FINACK
+# (o FIN ou o FINACK tambem podem se perder).
 def close_session(sock, total):
     sock.settimeout(Shared.TIMEOUT)
     fin = create_fin(total)
@@ -244,6 +293,7 @@ def main():
         cliente_socket.connect((Shared.HOST, Shared.PORT))
         print("Conectado com sucesso!")
 
+        # Handshake: envia HELLO (modo, tamanho, chave) e espera o CONFIG
         key = generate_key()
         print(f"Chave de sessao gerada: {to_hex(key)}")
         proposal = criar_handshake(modo, size, key)
@@ -253,6 +303,8 @@ def main():
         response = recv_packet(cliente_socket)
         print(f"Resposta do servidor: {response}")
 
+        # ack_mode nao e usado pelo cliente: ele trata o que chegar (ACK,
+        # NAK, ACKG ou WINDOW), qualquer que seja o modo do servidor
         try:
             window_size, ack_mode = parse_config(response)
         except ValueError as error:
@@ -266,6 +318,7 @@ def main():
         chunks = split_message(text)
         print(f"\nMensagem dividida em {len(chunks)} pacotes: {chunks}\n")
 
+        # a partir daqui toda espera por resposta tem limite (temporizador)
         cliente_socket.settimeout(Shared.TIMEOUT)
 
         if modo == "INDIVIDUAL":
