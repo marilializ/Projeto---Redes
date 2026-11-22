@@ -248,6 +248,15 @@ def send_gbn(sock, chunks, window_size, key):
             continue
 
         # 3) trata a resposta
+        # Servidor mudou a janela (WINDOW_SCHEDULE): vale a partir do passo 1.
+        # Regra de encolhimento: pacotes ja enviados acima do novo limite NAO
+        # sao cancelados; a janela nova so limita os proximos envios do
+        # passo 1, a medida que a base avanca.
+        if pkt["type"] == "WINDOW":
+            window_size = pkt["size"]
+            print(f"[CLIENTE] <- WINDOW SIZE={window_size} (Atualizando janela do cliente)")
+            continue
+
         if pkt["type"] == "ACK" and pkt["seq"] >= base:
             # cumulativo: tudo ate pkt["seq"] foi recebido, a janela desliza
             print(f"[CLIENTE] <- ACK SEQ={pkt['seq']} (cumulativo)")
@@ -259,8 +268,7 @@ def send_gbn(sock, chunks, window_size, key):
             print(f"[CLIENTE] <- NAK SEQ={pkt['seq']}, voltando para SEQ={base}")
             next_seq = base
         else:
-            # ACK/NAK de pacote ja confirmado (seq < base). Pacotes WINDOW
-            # tambem caem aqui: o GBN nao trata mudanca de janela no cliente.
+            # ACK/NAK de pacote ja confirmado (seq < base): resposta atrasada
             print(f"[CLIENTE] {pkt['type']} SEQ={pkt.get('seq')} antigo, ignorado")
 
 # Modo Repeticao Seletiva: ate `window_size` pacotes sem confirmacao, mas cada
@@ -311,7 +319,10 @@ def send_sr(sock, chunks, window_size, key):
             continue
 
         # 4) trata a resposta
-        # Servidor mudou a janela (WINDOW_SCHEDULE): vale a partir do passo 1
+        # Servidor mudou a janela (WINDOW_SCHEDULE): vale a partir do passo 1.
+        # Regra de encolhimento: pacotes ja enviados acima do novo limite NAO
+        # sao cancelados; a janela nova so limita os proximos envios do
+        # passo 1, a medida que a base avanca.
         if pkt["type"] == "WINDOW":
             window_size = pkt["size"]
             print(f"[CLIENTE] <- WINDOW SIZE={window_size} (Atualizando janela do cliente)")

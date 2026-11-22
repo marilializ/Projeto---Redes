@@ -30,6 +30,18 @@ PAYLOAD_SIZE = 4
 # Requisito: temporizador. Segundos sem confirmacao ate o cliente retransmitir.
 TIMEOUT = 2.0
 
+# Temporizador de recepcao do servidor (GBN/SR em GROUP: confirma o ultimo
+# lote incompleto). Precisa ser MENOR que o TIMEOUT do cliente, senao os dois
+# estouram juntos e o cliente retransmite a janela sem necessidade.
+SERVER_TIMEOUT = 1.0
+
+# Limites da janela (requisito: de 1 a 5, definida pelo servidor)
+MIN_WINDOW = 1
+MAX_WINDOW = 5
+
+# Quantos FIN com TOTAL divergente o servidor recusa antes de abortar
+MAX_FIN_REJEITADOS = 5
+
 # Mudancas de janela feitas pelo servidor durante a transmissao (GBN e SR).
 # Formato {seq: nova_janela}: quando o servidor passa a esperar o SEQ da chave,
 # ele muda a propria janela e avisa o cliente com um pacote WINDOW.

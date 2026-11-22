@@ -5,7 +5,10 @@
 
 import socket
 import time
-from Shared import HOST, PORT, DEFAULT_WINDOW_SIZE, WINDOW_SCHEDULE, SERVER_ACK_MODE, TIMEOUT
+from Shared import (
+    HOST, PORT, DEFAULT_WINDOW_SIZE, WINDOW_SCHEDULE, SERVER_ACK_MODE,
+    SERVER_TIMEOUT, MAX_FIN_REJEITADOS,
+)
 from Protocol import (
     parse_handshake, create_config, send_packet, recv_packet,
     parse_packet, verify_checksum, create_ack, create_nak, create_finack,
@@ -39,9 +42,15 @@ def open_data(sock, pkt, key):
 # agendada, troca a janela do servidor e avisa o cliente com WINDOW.
 # E chamada depois de receber um pacote, entao a chave 0 nunca dispara; ela
 # so documenta a janela inicial.
+# Usa a regra da MAIOR chave ja alcancada (chave <= expected_seq), e nao so a
+# chave exata: no SR o rcv_base pode pular varios SEQs de uma vez (quando o
+# buffer e esvaziado) e passaria por cima de uma mudanca agendada.
 def update_window_if_needed(sock, expected_seq, current_window):
-    if expected_seq in WINDOW_SCHEDULE and WINDOW_SCHEDULE[expected_seq] != current_window:
-        new_window = WINDOW_SCHEDULE[expected_seq]
+    alcancadas = [k for k in WINDOW_SCHEDULE if k <= expected_seq]
+    if not alcancadas:
+        return current_window
+    new_window = WINDOW_SCHEDULE[max(alcancadas)]
+    if new_window != current_window:
         print(f"[SERVIDOR] mudando janela de {current_window} para {new_window}")
         send_packet(sock, create_window(new_window))
         return new_window
@@ -53,8 +62,8 @@ def update_window_if_needed(sock, expected_seq, current_window):
 #   retransmitir o que falta.
 # - Se bate, manda FINACK e entra em TIME-WAIT (como no TCP): fica 3s
 #   respondendo a FINs repetidos, caso o FINACK tenha se perdido.
-# O parametro timeout_limit nao e usado; o TIME-WAIT esta fixo em 3s.
-def handle_fin(sock, pkt, received_len, fallback_packet, timeout_limit=5):
+# O limite de FINs recusados fica com quem chama (MAX_FIN_REJEITADOS).
+def handle_fin(sock, pkt, received_len, fallback_packet):
     if pkt["total"] != received_len:
         print(f"[SERVIDOR] aviso: FIN indica {pkt['total']} pacotes, recebidos {received_len}. REJEITADO.")
         send_packet(sock, fallback_packet)
@@ -73,20 +82,36 @@ def handle_fin(sock, pkt, received_len, fallback_packet, timeout_limit=5):
                      send_packet(sock, create_finack())
             except socket.timeout:
                 pass
-            # captura qualquer erro, inclusive ConnectionError quando o cliente
-            # fecha a conexao; nesse caso o laco continua ate completar os 3s
-            except:
+            except ConnectionError:
+                # o cliente recebeu o FINACK e fechou: nao ha mais FIN a atender
+                break
+            except ValueError:
                 pass
         return True
 
+
+# Chamada quando o cliente insiste num FIN com TOTAL divergente
+# MAX_FIN_REJEITADOS vezes. Nunca confirma dado que nao recebeu: encerra a
+# sessao sinalizando entrega incompleta (retorna None).
+def abortar_entrega(received_len):
+    print(f"[SERVIDOR] {MAX_FIN_REJEITADOS} FIN recusados: abortando com entrega "
+          f"incompleta ({received_len} pacotes recebidos)")
+    return None
+
 # Modo INDIVIDUAL (stop-and-wait): aceita so o SEQ esperado e confirma cada
-# pacote com ACK. Nao usa timeout no servidor: quem retransmite e o cliente.
+# pacote com ACK. Quem retransmite e o cliente; o timeout do servidor so serve
+# para o TIME-WAIT do handle_fin nao ficar bloqueado.
 def receive_individual(sock, key):
     expected_seq = 0
     received = []
+    sock.settimeout(SERVER_TIMEOUT)
+    fin_rejeitados = 0
 
     while True:
-        message = recv_packet(sock)
+        try:
+            message = recv_packet(sock)
+        except socket.timeout:
+            continue
 
         try:
             pkt = parse_packet(message)
@@ -114,13 +139,13 @@ def receive_individual(sock, key):
                 print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem, descartado")
 
         elif pkt["type"] == "FIN":
-            # diferente de handle_fin: aqui o FIN e aceito mesmo se o TOTAL
-            # nao bater (so registra o aviso) e nao ha TIME-WAIT
-            if pkt["total"] != len(received):
-                print(f"[SERVIDOR] aviso: FIN indica {pkt['total']} pacotes, recebidos {len(received)}")
-            print("[SERVIDOR] <- FIN -> FINACK")
-            send_packet(sock, create_finack())
-            return "".join(received)
+            # mesma politica dos modos GBN e SR: FIN com TOTAL divergente e
+            # recusado com NAK do SEQ que falta; FIN correto -> FINACK + TIME-WAIT
+            if handle_fin(sock, pkt, len(received), create_nak(expected_seq)):
+                return "".join(received)
+            fin_rejeitados += 1
+            if fin_rejeitados >= MAX_FIN_REJEITADOS:
+                return abortar_entrega(len(received))
 
         else:
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
@@ -135,7 +160,8 @@ def receive_gbn(sock, key):
     expected_seq = 0
     received = []
     current_window = DEFAULT_WINDOW_SIZE
-    sock.settimeout(TIMEOUT)
+    sock.settimeout(SERVER_TIMEOUT)
+    fin_rejeitados = 0
 
     while True:
         try:
@@ -176,7 +202,12 @@ def receive_gbn(sock, key):
             else:
                 # fora de ordem ou duplicado: descarta e repete o ACK do ultimo
                 # pacote recebido em ordem, para o cliente saber de onde voltar
-                print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem (esperado {expected_seq}), descartado")
+                if seq < expected_seq:
+                    print(f"[SERVIDOR] <- DATA SEQ={seq} duplicado (ja recebido), descartado")
+                else:
+                    print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem (esperado {expected_seq}), descartado")
+                # com expected_seq == 0 nenhum pacote chegou em ordem ainda, entao
+                # nao ha o que confirmar: o cliente sai pelo proprio temporizador
                 if expected_seq > 0:
                     send_packet(sock, create_ack(expected_seq - 1))
 
@@ -184,6 +215,9 @@ def receive_gbn(sock, key):
             # se faltar pacote, o NAK do SEQ esperado faz o cliente voltar nele
             if handle_fin(sock, pkt, len(received), create_nak(expected_seq)):
                 return "".join(received)
+            fin_rejeitados += 1
+            if fin_rejeitados >= MAX_FIN_REJEITADOS:
+                return abortar_entrega(len(received))
         else:
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
@@ -198,7 +232,8 @@ def receive_sr(sock, initial_window, key):
     buffer = {}
     received = []
     current_window = initial_window
-    sock.settimeout(TIMEOUT)
+    sock.settimeout(SERVER_TIMEOUT)
+    fin_rejeitados = 0
 
     while True:
         try:
@@ -272,6 +307,9 @@ def receive_sr(sock, initial_window, key):
             fallback = create_ackg(sorted(list(buffer.keys()))) if buffer else create_nak(rcv_base)
             if handle_fin(sock, pkt, len(received), fallback):
                 return "".join(received)
+            fin_rejeitados += 1
+            if fin_rejeitados >= MAX_FIN_REJEITADOS:
+                return abortar_entrega(len(received))
         else:
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
@@ -321,7 +359,10 @@ def start_server():
             print(f"modo {mode} desconhecido.")
             return
 
-        print(f"\n[SERVIDOR] mensagem reconstruida: '{text}'")
+        if text is None:
+            print("\n[SERVIDOR] entrega incompleta: mensagem nao reconstruida")
+        else:
+            print(f"\n[SERVIDOR] mensagem reconstruida: '{text}'")
 
 
     except ConnectionError as error:
