@@ -70,12 +70,16 @@ def wait_response(sock, seq):
 
     while True:
         try:
-            pkt = parse_packet(recv_packet(sock))
+            pkt = recv_confirmacao(sock)
         except socket.timeout:
             # o socket tem settimeout(TIMEOUT): este e o temporizador do pacote
             return "TIMEOUT"
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
+            continue
+
+        # confirmacao perdida pelo simulador: segue esperando
+        if pkt is None:
             continue
 
         if pkt["type"] in ("ACK", "NAK") and pkt["seq"] == seq:
@@ -84,15 +88,87 @@ def wait_response(sock, seq):
         print(f"[CLIENTE] pacote inesperado ignorado: {pkt}")
 
 
+# --- Simulador de erros e perdas --------------------------------------------
+# Deterministico: os erros sao indexados por SEQ em Shared.ERROR_PLAN, nunca
+# sorteados, entao o mesmo plano sempre gera o mesmo log.
+
+# Pares (tipo_de_erro, seq) que ja foram aplicados. Sem essa memoria, a
+# retransmissao sofreria o mesmo erro de novo e o pacote nunca chegaria.
+_ja_sabotados = set()
+
+
+def deve_sabotar(tipo, seq):
+    # True so na primeira vez que `seq` passa por um erro do tipo `tipo`
+    if seq not in Shared.ERROR_PLAN.get(tipo, []):
+        return False
+    if (tipo, seq) in _ja_sabotados:
+        return False
+    _ja_sabotados.add((tipo, seq))
+    return True
+
+
+HEX_DIGITS = "0123456789abcdef"
+
+
+def corromper(packet):
+    # O payload (hex) e sempre o ultimo campo do DATA. Troca o ultimo digito
+    # hex pelo proximo digito hex: o pacote continua parseavel, mas o CHK foi
+    # calculado sobre o payload original, entao o servidor detecta a falha.
+    ultimo = packet[-1]
+    trocado = HEX_DIGITS[(HEX_DIGITS.index(ultimo) + 1) % 16]
+    return packet[:-1] + trocado
+
+
 def build_packet(seq, payload, key):
     # Unico ponto onde o cliente monta pacotes DATA (todos os modos passam aqui).
     packet = create_data(seq, payload, key)
-    # PONTO DE INTEGRACAO: simulacao de erros.
-    # A corrupcao deve ser aplicada AQUI, sobre `packet` ja cifrado e com
-    # checksum calculado. Corromper antes de create_data so geraria texto
-    # decifrado errado, sem falha de checksum (e sem NAK). Para manter o pacote
-    # parseavel, troque um digito hex do payload por outro digito hex.
+    # A corrupcao e aplicada AQUI, sobre `packet` ja cifrado e com checksum
+    # calculado. Corromper antes de create_data so geraria texto decifrado
+    # errado, sem falha de checksum (e sem NAK).
+    if deve_sabotar("corrupt", seq):
+        original = cipher_of(packet)
+        packet = corromper(packet)
+        print(f"[SIMULADOR] DATA SEQ={seq} corrompido no canal: "
+              f"{original} -> {cipher_of(packet)}")
     return packet
+
+
+def send_data(sock, seq, payload, key, info=""):
+    # Ponto unico de ENVIO de DATA: primeiro envio e retransmissoes passam
+    # aqui. O pacote e remontado a cada chamada, entao um erro da 1a tentativa
+    # nao se repete na retransmissao.
+    packet = build_packet(seq, payload, key)
+    print(f"[CLIENTE] -> DATA SEQ={seq} '{payload}' cifrado={cipher_of(packet)}{info}")
+
+    if deve_sabotar("drop_data", seq):
+        print(f"[SIMULADOR] DATA SEQ={seq} perdido no canal (nao enviado)")
+        return
+
+    send_packet(sock, packet)
+
+    if deve_sabotar("duplicate", seq):
+        print(f"[SIMULADOR] DATA SEQ={seq} duplicado no canal (enviado de novo)")
+        send_packet(sock, packet)
+
+
+def recv_confirmacao(sock):
+    # Ponto unico de RECEPCAO de confirmacoes. Retorna o pacote, ou None quando
+    # o simulador "perde" a confirmacao: para o cliente e como se ela nunca
+    # tivesse chegado, entao o temporizador continua correndo.
+    pkt = parse_packet(recv_packet(sock))
+
+    if pkt["type"] == "ACK" and deve_sabotar("drop_ack", pkt["seq"]):
+        print(f"[SIMULADOR] ACK SEQ={pkt['seq']} perdido no canal (descartado)")
+        return None
+
+    if pkt["type"] == "ACKG":
+        alvos = [s for s in pkt["seqs"] if deve_sabotar("drop_ack", s)]
+        if alvos:
+            print(f"[SIMULADOR] ACKG SEQS={pkt['seqs']} perdido no canal "
+                  f"(continha SEQ {alvos})")
+            return None
+
+    return pkt
 
 
 def cipher_of(packet):
@@ -104,12 +180,10 @@ def cipher_of(packet):
 # depois do ACK. NAK ou timeout reenviam o mesmo pacote.
 def send_individual(sock, chunks, key):
     for seq, payload in enumerate(chunks):
-        packet = build_packet(seq, payload, key)
-
-        # repete ate o pacote ser confirmado
+        # repete ate o pacote ser confirmado (send_data remonta o pacote a
+        # cada tentativa, entao a retransmissao sai sem o erro simulado)
         while True:
-            send_packet(sock, packet)
-            print(f"[CLIENTE] -> DATA SEQ={seq} '{payload}' cifrado={cipher_of(packet)}")
+            send_data(sock, seq, payload, key)
 
             result = wait_response(sock, seq)
             if result == "ACK":
@@ -136,10 +210,8 @@ def send_gbn(sock, chunks, window_size, key):
     while base < total:
         # 1) preenche a janela: envia enquanto houver espaco e pacotes
         while next_seq < base + window_size and next_seq < total:
-            packet = build_packet(next_seq, chunks[next_seq], key)
-            send_packet(sock, packet)
-            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}' cifrado={cipher_of(packet)}   "
-                  f"janela=[{base}..{base + window_size - 1}]")
+            send_data(sock, next_seq, chunks[next_seq], key,
+                      f"   janela=[{base}..{base + window_size - 1}]")
             # o temporizador e do pacote mais antigo: so liga se este for a base
             if base == next_seq:
                 timer_start = time.monotonic()
@@ -152,7 +224,7 @@ def send_gbn(sock, chunks, window_size, key):
                 # o temporizador ja estourou antes mesmo de esperar
                 raise socket.timeout
             sock.settimeout(remaining)
-            pkt = parse_packet(recv_packet(sock))
+            pkt = recv_confirmacao(sock)
         except socket.timeout:
             # Go-Back-N: next_seq = base faz o passo 1 reenviar a janela inteira
             print(f"[CLIENTE] timeout! voltando para SEQ={base} e reenviando a janela")
@@ -160,6 +232,10 @@ def send_gbn(sock, chunks, window_size, key):
             continue
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
+            continue
+
+        # confirmacao perdida pelo simulador: segue esperando
+        if pkt is None:
             continue
 
         # 3) trata a resposta
@@ -194,10 +270,8 @@ def send_sr(sock, chunks, window_size, key):
     while base < total:
         # 1) preenche a janela, ligando um temporizador para cada pacote
         while next_seq < base + window_size and next_seq < total:
-            packet = build_packet(next_seq, chunks[next_seq], key)
-            send_packet(sock, packet)
-            print(f"[CLIENTE] -> DATA SEQ={next_seq} '{chunks[next_seq]}' cifrado={cipher_of(packet)}   "
-                  f"janela=[{base}..{base + window_size - 1}]")
+            send_data(sock, next_seq, chunks[next_seq], key,
+                      f"   janela=[{base}..{base + window_size - 1}]")
             timers[next_seq] = time.monotonic()
             next_seq += 1
 
@@ -205,8 +279,8 @@ def send_sr(sock, chunks, window_size, key):
         now = time.monotonic()
         expired = [s for s, t in timers.items() if now - t >= Shared.TIMEOUT]
         for s in expired:
-            send_packet(sock, build_packet(s, chunks[s], key))
             print(f"[CLIENTE] timeout SEQ={s}, retransmitindo apenas ele")
+            send_data(sock, s, chunks[s], key)
             timers[s] = time.monotonic()
 
         # 3) espera resposta ate o proximo temporizador a estourar (o mais
@@ -215,12 +289,16 @@ def send_sr(sock, chunks, window_size, key):
         remaining = Shared.TIMEOUT - (time.monotonic() - oldest)
         try:
             sock.settimeout(max(remaining, 0.01))
-            pkt = parse_packet(recv_packet(sock))
+            pkt = recv_confirmacao(sock)
         except socket.timeout:
             # volta ao passo 2, que reenvia o que expirou
             continue
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
+            continue
+
+        # confirmacao perdida pelo simulador: segue esperando
+        if pkt is None:
             continue
 
         # 4) trata a resposta
@@ -254,7 +332,7 @@ def send_sr(sock, chunks, window_size, key):
                 base += 1
         elif pkt["type"] == "NAK" and seq in timers:
             print(f"[CLIENTE] <- NAK SEQ={seq}, retransmitindo apenas ele")
-            send_packet(sock, build_packet(seq, chunks[seq], key))
+            send_data(sock, seq, chunks[seq], key)
             timers[seq] = time.monotonic()
         else:
             if pkt["type"] not in ("WINDOW", "ACKG"):
@@ -316,7 +394,8 @@ def main():
 
         text = read_message(size)
         chunks = split_message(text)
-        print(f"\nMensagem dividida em {len(chunks)} pacotes: {chunks}\n")
+        print(f"\nMensagem dividida em {len(chunks)} pacotes: {chunks}")
+        print(f"Plano de erros: {Shared.ERROR_PLAN}\n")
 
         # a partir daqui toda espera por resposta tem limite (temporizador)
         cliente_socket.settimeout(Shared.TIMEOUT)
