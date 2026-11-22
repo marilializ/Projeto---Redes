@@ -67,12 +67,19 @@ def read_message(max_size):
 # "ACK", "NAK" ou "TIMEOUT". Respostas de outros SEQs (ex.: ACK atrasado de um
 # pacote anterior) sao ignoradas e a espera continua.
 def wait_response(sock, seq):
+    # O temporizador do pacote tem um prazo FIXO, marcado no inicio da espera.
+    # A cada volta o socket espera so o que falta ate esse prazo; assim um
+    # pacote inesperado (ex.: ACK atrasado) nao reinicia o temporizador.
+    deadline = time.monotonic() + Shared.TIMEOUT
 
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "TIMEOUT"
         try:
+            sock.settimeout(remaining)
             pkt = recv_confirmacao(sock)
         except socket.timeout:
-            # o socket tem settimeout(TIMEOUT): este e o temporizador do pacote
             return "TIMEOUT"
         except ValueError as error:
             print(f"[CLIENTE] pacote invalido ignorado: {error}")
@@ -205,7 +212,9 @@ def send_gbn(sock, chunks, window_size, key):
     total = len(chunks)
     base = 0
     next_seq = 0
-    timer_start = None
+    # inicializado com o instante atual (e nao None) para a subtracao do
+    # passo 2 nunca quebrar; o passo 1 reinicia ao enviar o pacote da base
+    timer_start = time.monotonic()
 
     while base < total:
         # 1) preenche a janela: envia enquanto houver espaco e pacotes
@@ -342,23 +351,38 @@ def send_sr(sock, chunks, window_size, key):
 
 # Encerramento: envia FIN com o total de pacotes e repete ate receber FINACK
 # (o FIN ou o FINACK tambem podem se perder).
-def close_session(sock, total):
-    sock.settimeout(Shared.TIMEOUT)
+def close_session(sock, total, max_tentativas=5):
+    # O FIN so e reenviado quando o temporizador estoura. Confirmacoes
+    # atrasadas da fase de dados (ACK, ACKG, WINDOW) que chegam aqui sao
+    # ignoradas sem reenviar o FIN. Depois de `max_tentativas` sem FINACK
+    # (servidor fora do ar, por exemplo), desiste em vez de tentar para sempre.
     fin = create_fin(total)
-    while True:
+    for tentativa in range(1, max_tentativas + 1):
         send_packet(sock, fin)
-        print(f"[CLIENTE] -> FIN TOTAL={total}")
-        try:
-            pkt = parse_packet(recv_packet(sock))
-        except socket.timeout:
-            print("[CLIENTE] timeout no FIN, retransmitindo")
-            continue
-        except ValueError:
-            continue
+        print(f"[CLIENTE] -> FIN TOTAL={total} (tentativa {tentativa}/{max_tentativas})")
+        deadline = time.monotonic() + Shared.TIMEOUT
 
-        if pkt["type"] == "FINACK":
-            print("[CLIENTE] <- FINACK")
-            return
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print("[CLIENTE] timeout no FIN")
+                break
+            try:
+                sock.settimeout(remaining)
+                pkt = parse_packet(recv_packet(sock))
+            except socket.timeout:
+                print("[CLIENTE] timeout no FIN")
+                break
+            except ValueError:
+                continue
+
+            if pkt["type"] == "FINACK":
+                print("[CLIENTE] <- FINACK")
+                return True
+            print(f"[CLIENTE] {pkt['type']} atrasado ignorado durante o encerramento")
+
+    print(f"[CLIENTE] sem FINACK apos {max_tentativas} tentativas, desistindo")
+    return False
 
 
 def main():
@@ -410,8 +434,10 @@ def main():
             print(f"Modo {modo} desconhecido.")
             return
 
-        close_session(cliente_socket, len(chunks))
-        print("\nTransmissao concluida!")
+        if close_session(cliente_socket, len(chunks)):
+            print("\nTransmissao concluida!")
+        else:
+            print("\nTransmissao encerrada sem confirmacao do FIN.")
 
     except Exception as e:
         print(f"Erro: {e}")
