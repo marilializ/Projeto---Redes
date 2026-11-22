@@ -1,3 +1,8 @@
+# Servidor: aceita um cliente, valida o handshake, responde com CONFIG e recebe
+# os pacotes no modo pedido (INDIVIDUAL, GBN ou SR). Verifica o checksum de
+# cada pacote, decifra, confirma com ACK/NAK/ACKG e remonta a mensagem.
+# Atende uma unica transmissao e encerra.
+
 import socket
 import time
 from Shared import HOST, PORT, DEFAULT_WINDOW_SIZE, WINDOW_SCHEDULE, SERVER_ACK_MODE, TIMEOUT
@@ -30,6 +35,10 @@ def open_data(sock, pkt, key):
     print(f"[SERVIDOR] SEQ={seq} cifrado={cipher_hex} -> decifrado '{text}'")
     return text
 
+# Aplica WINDOW_SCHEDULE: se o proximo SEQ esperado tem uma mudanca de janela
+# agendada, troca a janela do servidor e avisa o cliente com WINDOW.
+# E chamada depois de receber um pacote, entao a chave 0 nunca dispara; ela
+# so documenta a janela inicial.
 def update_window_if_needed(sock, expected_seq, current_window):
     if expected_seq in WINDOW_SCHEDULE and WINDOW_SCHEDULE[expected_seq] != current_window:
         new_window = WINDOW_SCHEDULE[expected_seq]
@@ -38,6 +47,13 @@ def update_window_if_needed(sock, expected_seq, current_window):
         return new_window
     return current_window
 
+# Trata o FIN nos modos GBN e SR. Devolve True se a sessao pode terminar.
+# - Se o TOTAL do FIN nao bate com o que foi entregue, ainda faltam pacotes:
+#   recusa o FIN e manda `fallback_packet` (NAK/ACKG) para o cliente
+#   retransmitir o que falta.
+# - Se bate, manda FINACK e entra em TIME-WAIT (como no TCP): fica 3s
+#   respondendo a FINs repetidos, caso o FINACK tenha se perdido.
+# O parametro timeout_limit nao e usado; o TIME-WAIT esta fixo em 3s.
 def handle_fin(sock, pkt, received_len, fallback_packet, timeout_limit=5):
     if pkt["total"] != received_len:
         print(f"[SERVIDOR] aviso: FIN indica {pkt['total']} pacotes, recebidos {received_len}. REJEITADO.")
@@ -57,10 +73,14 @@ def handle_fin(sock, pkt, received_len, fallback_packet, timeout_limit=5):
                      send_packet(sock, create_finack())
             except socket.timeout:
                 pass
+            # captura qualquer erro, inclusive ConnectionError quando o cliente
+            # fecha a conexao; nesse caso o laco continua ate completar os 3s
             except:
                 pass
         return True
 
+# Modo INDIVIDUAL (stop-and-wait): aceita so o SEQ esperado e confirma cada
+# pacote com ACK. Nao usa timeout no servidor: quem retransmite e o cliente.
 def receive_individual(sock, key):
     expected_seq = 0
     received = []
@@ -86,12 +106,16 @@ def receive_individual(sock, key):
                 print(f"[SERVIDOR] <- DATA SEQ={seq} '{payload}' -> ACK")
                 send_packet(sock, create_ack(seq))
             elif seq < expected_seq:
+                # duplicado: o ACK anterior se perdeu e o cliente retransmitiu.
+                # Confirma de novo, mas nao entrega o pacote outra vez.
                 print(f"[SERVIDOR] <- DATA SEQ={seq} duplicado -> ACK")
                 send_packet(sock, create_ack(seq))
             else:
                 print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem, descartado")
 
         elif pkt["type"] == "FIN":
+            # diferente de handle_fin: aqui o FIN e aceito mesmo se o TOTAL
+            # nao bater (so registra o aviso) e nao ha TIME-WAIT
             if pkt["total"] != len(received):
                 print(f"[SERVIDOR] aviso: FIN indica {pkt['total']} pacotes, recebidos {len(received)}")
             print("[SERVIDOR] <- FIN -> FINACK")
@@ -102,6 +126,11 @@ def receive_individual(sock, key):
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
 
+# Modo Go-Back-N: o receptor nao tem buffer. Aceita so o SEQ esperado e
+# descarta qualquer pacote fora de ordem.
+# No modo GROUP o ACK e cumulativo e enviado quando um lote fecha
+# (expected_seq multiplo da janela atual, contado desde o SEQ 0) ou quando
+# o servidor fica TIMEOUT segundos sem receber nada.
 def receive_gbn(sock, key):
     expected_seq = 0
     received = []
@@ -113,6 +142,9 @@ def receive_gbn(sock, key):
             message = recv_packet(sock)
             pkt = parse_packet(message)
         except socket.timeout:
+            # silencio no canal: confirma o que ja chegou em ordem, para o
+            # cliente nao ficar esperando um lote que nao vai fechar
+            # (ex.: ultimo lote menor que a janela)
             if SERVER_ACK_MODE == "GROUP" and expected_seq > 0:
                 print(f"[SERVIDOR] timeout de recepção -> enviando ACK cumulativo {expected_seq - 1}")
                 send_packet(sock, create_ack(expected_seq - 1))
@@ -142,17 +174,25 @@ def receive_gbn(sock, key):
                          print(f"[SERVIDOR] lote de {current_window} pacotes fechado -> ACK {expected_seq - 1}")
                          send_packet(sock, create_ack(expected_seq - 1))
             else:
+                # fora de ordem ou duplicado: descarta e repete o ACK do ultimo
+                # pacote recebido em ordem, para o cliente saber de onde voltar
                 print(f"[SERVIDOR] <- DATA SEQ={seq} fora de ordem (esperado {expected_seq}), descartado")
                 if expected_seq > 0:
                     send_packet(sock, create_ack(expected_seq - 1))
 
         elif pkt["type"] == "FIN":
+            # se faltar pacote, o NAK do SEQ esperado faz o cliente voltar nele
             if handle_fin(sock, pkt, len(received), create_nak(expected_seq)):
                 return "".join(received)
         else:
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
 
+# Modo Repeticao Seletiva: o receptor aceita pacotes fora de ordem dentro da
+# janela e os guarda no buffer ate poder entrega-los em ordem.
+#   rcv_base = proximo SEQ a ser entregue em ordem
+#   buffer   = {seq: texto} dos pacotes recebidos e ainda nao entregues
+#   janela de recepcao = [rcv_base, rcv_base + current_window)
 def receive_sr(sock, initial_window, key):
     rcv_base = 0
     buffer = {}
@@ -165,6 +205,8 @@ def receive_sr(sock, initial_window, key):
             message = recv_packet(sock)
             pkt = parse_packet(message)
         except socket.timeout:
+            # silencio no canal: reconfirma o que esta no buffer (pacotes ja
+            # entregues nao entram nesta lista)
             if SERVER_ACK_MODE == "GROUP" and len(buffer) > 0:
                 seqs = sorted(list(buffer.keys()))
                 print(f"[SERVIDOR] timeout de recepção -> enviando ACKG para buffer {seqs}")
@@ -180,6 +222,7 @@ def receive_sr(sock, initial_window, key):
             if payload is None:
                 continue
 
+            # dentro da janela de recepcao: guarda e entrega o que estiver em ordem
             if rcv_base <= seq < rcv_base + current_window:
                 if SERVER_ACK_MODE == "INDIVIDUAL":
                      send_packet(sock, create_ack(seq))
@@ -190,8 +233,12 @@ def receive_sr(sock, initial_window, key):
                 else:
                     print(f"[SERVIDOR] <- DATA SEQ={seq} duplicado")
 
+                # lista tirada ANTES da entrega abaixo, para o ACKG incluir
+                # tambem os pacotes que vao sair do buffer agora
                 pacotes_confirmados = sorted(list(buffer.keys()))
 
+                # entrega em ordem: enquanto o proximo SEQ esperado estiver no
+                # buffer, passa para a mensagem e avanca a janela
                 while rcv_base in buffer:
                     received.append(buffer.pop(rcv_base))
                     print(f"[SERVIDOR] SEQ={rcv_base} entregue em ordem")
@@ -202,6 +249,9 @@ def receive_sr(sock, initial_window, key):
 
                 current_window = update_window_if_needed(sock, rcv_base, current_window)
 
+            # ate uma janela atras de rcv_base: pacote ja entregue, retransmitido
+            # porque a confirmacao se perdeu. So o modo INDIVIDUAL reconfirma;
+            # no modo GROUP nenhuma confirmacao e reenviada aqui.
             elif rcv_base - current_window <= seq < rcv_base:
                 print(f"[SERVIDOR] <- DATA SEQ={seq} ja entregue -> ACK {seq} de novo")
                 if SERVER_ACK_MODE == "INDIVIDUAL":
@@ -210,14 +260,17 @@ def receive_sr(sock, initial_window, key):
                 print(f"[SERVIDOR] <- DATA SEQ={seq} fora da janela, ignorado")
 
         elif pkt["type"] == "FIN":
+            # se faltar pacote: ACKG do que esta no buffer, ou NAK de rcv_base
             fallback = create_ackg(sorted(list(buffer.keys()))) if buffer else create_nak(rcv_base)
             if handle_fin(sock, pkt, len(received), fallback):
                 return "".join(received)
         else:
             print(f"[SERVIDOR] pacote inesperado ignorado: {pkt}")
 
+# Ponto de entrada: abre o socket, atende um cliente e encerra
 def start_server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # SO_REUSEADDR permite reiniciar o servidor logo em seguida na mesma porta
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     server_socket.bind((HOST, PORT))
@@ -236,6 +289,7 @@ def start_server():
             print(f"tamanho máximo: {max_message_size}")
             print(f"chave de sessao: {to_hex(key)}")
 
+            # stop-and-wait equivale a uma janela de tamanho 1
             window_size = 1 if mode == "INDIVIDUAL" else DEFAULT_WINDOW_SIZE
             
             response = create_config(window_size, SERVER_ACK_MODE)
@@ -243,6 +297,7 @@ def start_server():
             send_packet(client_socket, response)
             print(f"configuração enviada: {response}\n")
 
+        # HELLO invalido: responde ERROR com o motivo e encerra
         except ValueError as error:
             print(f"erro no handshake: {error}")
             send_packet(client_socket, f"ERROR|{error}")
