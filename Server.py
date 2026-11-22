@@ -249,13 +249,21 @@ def receive_sr(sock, initial_window, key):
 
                 current_window = update_window_if_needed(sock, rcv_base, current_window)
 
-            # ate uma janela atras de rcv_base: pacote ja entregue, retransmitido
-            # porque a confirmacao se perdeu. So o modo INDIVIDUAL reconfirma;
-            # no modo GROUP nenhuma confirmacao e reenviada aqui.
-            elif rcv_base - current_window <= seq < rcv_base:
-                print(f"[SERVIDOR] <- DATA SEQ={seq} ja entregue -> ACK {seq} de novo")
+            # Pacote ja entregue chegando de novo: a confirmacao dele se perdeu
+            # e o cliente retransmitiu. O servidor PRECISA reconfirmar (nos dois
+            # modos de ACK), senao o cliente retransmite para sempre.
+            # A condicao e qualquer seq < rcv_base, e nao so "ate uma janela
+            # atras": como a janela muda (WINDOW_SCHEDULE), essa faixa encolhia
+            # e um pacote ja entregue caia em "fora da janela" sem resposta.
+            # Nao ha problema de ambiguidade porque o SEQ nao da a volta
+            # (sem aritmetica modular).
+            elif seq < rcv_base:
                 if SERVER_ACK_MODE == "INDIVIDUAL":
+                    print(f"[SERVIDOR] <- DATA SEQ={seq} ja entregue -> ACK {seq} de novo")
                     send_packet(sock, create_ack(seq))
+                else:
+                    print(f"[SERVIDOR] <- DATA SEQ={seq} ja entregue -> ACKG [{seq}] de novo")
+                    send_packet(sock, create_ackg([seq]))
             else:
                 print(f"[SERVIDOR] <- DATA SEQ={seq} fora da janela, ignorado")
 
